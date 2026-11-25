@@ -1,0 +1,21 @@
+site_name: ATLAS v2 Documentation
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage: usage.md
+  - API Reference: api.md
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: pink
+  font:
+    text: Roboto
+    code: Roboto Mono
+markdown_extensions:
+  - admonition
+  - codehilite
+  - footnotes
+  - meta
+  - toc:
+      permalink: true
