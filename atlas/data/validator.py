@@ -1,5 +1,12 @@
 """Contrôle qualité des chandeliers. Aucun backtest ne doit tourner sur des
-données qui n'ont pas passé ce contrôle."""
+données qui n'ont pas passé ce contrôle.
+
+Détection des bougies fabriquées (cas d'un fichier "rempli" par une IA) :
+- bougies un samedi, ou un dimanche avant 21:00 : l'or ne se négocie pas ;
+- bougies plates (open = high = low = close) et bougies copiées de la
+  précédente : bloquant au-delà de 1 % des lignes (si au moins 500 lignes).
+Le volume nul est une simple information.
+"""
 
 from dataclasses import dataclass, field
 from typing import List, Tuple
@@ -7,6 +14,10 @@ from typing import List, Tuple
 import pandas as pd
 
 Gap = Tuple[pd.Timestamp, pd.Timestamp, bool]  # (début, fin, est_un_week_end)
+
+MIN_ROWS_FOR_RATIO_CHECK = 500
+MAX_SUSPECT_RATIO = 0.01  # 1 %
+SUNDAY_OPEN_HOUR = 21  # une bougie le dimanche avant cette heure est suspecte
 
 
 @dataclass
@@ -18,6 +29,10 @@ class ValidationReport:
     duplicates: int = 0
     non_monotonic: int = 0
     gaps: List[Gap] = field(default_factory=list)
+    weekend_candles: int = 0
+    flat_candles: int = 0
+    repeated_candles: int = 0
+    zero_volume: int = 0
 
     @property
     def unexpected_gaps(self) -> List[Gap]:
@@ -33,10 +48,26 @@ class ValidationReport:
             + self.non_monotonic
         )
 
+    def _ratio_exceeded(self, count: int) -> bool:
+        return (
+            self.n_rows >= MIN_ROWS_FOR_RATIO_CHECK
+            and count / self.n_rows > MAX_SUSPECT_RATIO
+        )
+
+    @property
+    def fabricated_suspected(self) -> bool:
+        """True si le fichier contient des signes de bougies inventées."""
+        return (
+            self.weekend_candles > 0
+            or self._ratio_exceeded(self.flat_candles)
+            or self._ratio_exceeded(self.repeated_candles)
+        )
+
     @property
     def ok(self) -> bool:
-        """True si aucune erreur bloquante (les trous sont des avertissements)."""
-        return self.errors == 0
+        """True si aucune erreur bloquante. Les trous, le volume nul et quelques
+        bougies plates/copiées isolées sont des avertissements."""
+        return self.errors == 0 and not self.fabricated_suspected
 
     def summary(self) -> str:
         lines = [
@@ -46,9 +77,18 @@ class ValidationReport:
             f"OHLC incohérents     : {self.invalid_ohlc}",
             f"Doublons de date     : {self.duplicates}",
             f"Dates non croissantes: {self.non_monotonic}",
+            f"Bougies de week-end  : {self.weekend_candles} (bloquant si > 0)",
+            f"Bougies plates       : {self.flat_candles} (bloquant si > 1 % des lignes, dès 500 lignes)",
+            f"Bougies copiées      : {self.repeated_candles} (bloquant si > 1 % des lignes, dès 500 lignes)",
+            f"Volume nul           : {self.zero_volume} (information)",
             f"Trous hors week-end  : {len(self.unexpected_gaps)} (avertissement)",
             f"RESULTAT             : {'OK' if self.ok else 'ERREURS A CORRIGER'}",
         ]
+        if self.fabricated_suspected:
+            lines.append(
+                "-> Ce fichier contient des bougies fabriquées (week-end ou copies). "
+                "Ne l'utilise pas : réexporte l'historique brut depuis MT5 ou Dukascopy."
+            )
         return "\n".join(lines)
 
 
@@ -89,6 +129,21 @@ def validate_candles(
     idx = df.index
     report.duplicates = int(idx.duplicated().sum())
     report.non_monotonic = int((idx[1:] < idx[:-1]).sum())
+
+    # Signes de bougies fabriquées
+    dow = idx.day_of_week
+    hour = idx.hour
+    report.weekend_candles = int(
+        ((dow == 5) | ((dow == 6) & (hour < SUNDAY_OPEN_HOUR))).sum()
+    )
+    report.flat_candles = int(
+        ((prices["open"] == prices["high"])
+         & (prices["high"] == prices["low"])
+         & (prices["low"] == prices["close"])).sum()
+    )
+    report.repeated_candles = int(prices.eq(prices.shift(1)).all(axis=1).sum())
+    if "volume" in df.columns and (df["volume"] > 0).any():
+        report.zero_volume = int((df["volume"] == 0).sum())
 
     # Trous : seulement sur les dates déjà triées et uniques
     clean_idx = idx.drop_duplicates().sort_values()

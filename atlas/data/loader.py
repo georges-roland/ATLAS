@@ -33,7 +33,14 @@ def load_candles(path: Union[str, Path]) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Fichier introuvable : {path}")
 
-    df = pd.read_csv(path, sep=None, engine="python")
+    # Detect encoding (handle UTF‑16 with BOM or UTF‑8 with BOM)
+    with open(path, "rb") as f:
+        raw_start = f.read(4)
+    if raw_start.startswith(b"\xff\xfe") or raw_start.startswith(b"\xfe\xff"):
+        enc = "utf-16"
+    else:
+        enc = "utf-8-sig"
+    df = pd.read_csv(path, sep=None, engine="python", encoding=enc)
     df.columns = [str(c).strip().strip("<>").lower() for c in df.columns]
 
     missing = [c for c in OHLC if c not in df.columns]

@@ -52,3 +52,23 @@ def test_loader_does_not_silently_fix_duplicates(tmp_path):
         encoding="utf-8",
     )
     assert len(load_candles(f)) == 2
+
+
+MT5_TEXT = (
+    "<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>\n"
+    "2024.01.02\t01:00:00\t2060.5\t2062.0\t2059.0\t2061.0\t850\t0\t25\n"
+    "2024.01.02\t02:00:00\t2061.0\t2063.5\t2060.5\t2063.0\t900\t0\t25\n"
+)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-8-sig"])
+def test_load_mt5_export_in_other_encodings(tmp_path, encoding):
+    f = tmp_path / "xau.csv"
+    if encoding == "utf-16-le":  # UTF-16 little endian AVEC BOM, comme Windows
+        f.write_bytes(b"\xff\xfe" + MT5_TEXT.encode("utf-16-le"))
+    else:
+        f.write_bytes(MT5_TEXT.encode(encoding))
+    df = load_candles(f)
+    assert len(df) == 2
+    assert df["close"].iloc[1] == 2063.0
+    assert df["volume"].iloc[0] == 850
