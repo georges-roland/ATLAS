@@ -93,6 +93,25 @@ def test_signal_is_omitted_when_size_is_below_broker_minimum():
     assert generate_signal(candles, 100, config=config) is None
 
 
+def test_signal_can_be_detected_without_calculating_position_size():
+    candles = make_df([FLAT] * 4 + [BREAKOUT])
+    config = SignalConfig(
+        ema_span=2,
+        atr_period=2,
+        sl_mult=1.0,
+        spread=0.0,
+        slippage=0.0,
+    )
+
+    signal = generate_signal(candles, 100, size_position=False, config=config)
+
+    assert signal is not None
+    assert signal.action == "buy"
+    assert signal.stop_price == pytest.approx(104)
+    assert signal.lots == 0.0
+    assert signal.risk_amount == 0.0
+
+
 def test_downward_cross_does_not_propose_a_short():
     candles = make_df(SIGNAL_EXIT_BARS)
     config = SignalConfig(ema_span=2, atr_period=2, sl_mult=1.0)

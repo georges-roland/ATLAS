@@ -65,6 +65,7 @@ def generate_signal(
     equity: float,
     *,
     position_side: Optional[Literal["long"]] = None,
+    size_position: bool = True,
     config: SignalConfig = SignalConfig(),
 ) -> Optional[Signal]:
     """Calcule le signal sur la dernière bougie clôturée.
@@ -131,10 +132,23 @@ def generate_signal(
         return None
 
     stop_distance = config.sl_mult * current_atr
-    risk_distance = stop_distance + config.spread + 2.0 * config.slippage
     stop_price = current_close - stop_distance
+    if stop_price <= 0:
+        return None
+
+    if not size_position:
+        return Signal(
+            action="buy",
+            time=candles.index[-1],
+            reference_price=current_close,
+            ema_value=current_ema,
+            atr_value=current_atr,
+            stop_price=stop_price,
+        )
+
+    risk_distance = stop_distance + config.spread + 2.0 * config.slippage
     sizing_stop = current_close - risk_distance
-    if stop_price <= 0 or sizing_stop <= 0:
+    if sizing_stop <= 0:
         return None
 
     lots = lots_for_risk(
