@@ -8,6 +8,8 @@ Règles (toutes testées dans tests/test_backtest.py) :
 - Gap : si la bougie ouvre au-delà du stop, on sort à l'ouverture (pire prix).
 - Coûts : spread, slippage et commission. Les prix OHLC sont considérés comme
   des prix "milieu" : achat à +spread/2 +slippage, vente à -spread/2 -slippage.
+- Swap (rollover) : coût par once et par nuit tenue. Le mercredi compte triple,
+  le week-end est gratuit (le swap du week-end est payé via le mercredi).
 - Taille de position = atlas.risk.lots_for_risk. Si 0 lot, le trade est ignoré.
 - Un seul trade ouvert à la fois. Capital suivi bougie par bougie (vrai
   drawdown, position ouverte valorisée à la clôture, coûts de sortie inclus).
@@ -42,6 +44,8 @@ class BacktestConfig:
     spread: float = 0.30  # en USD par once (écart bid/ask total)
     slippage: float = 0.05  # en USD par once, par exécution
     commission_per_lot: float = 7.0  # aller-retour, en USD par lot
+    swap_long_per_oz: float = 0.0  # USD par once et par nuit (positif = coût)
+    swap_short_per_oz: float = 0.0  # idem pour les ventes
     instrument: InstrumentSpec = XAUUSD
 
 
@@ -55,8 +59,9 @@ class Trade:
     exit_price: float  # prix exécuté
     exit_reason: str  # stop_loss, stop_loss_gap, take_profit, signal, end_of_data
     gross_pnl: float  # sur les prix "milieu", avant tout coût
-    costs: float  # spread + slippage + commission
+    costs: float  # spread + slippage + commission + swap
     net_pnl: float  # gross_pnl - costs
+    swap: float = 0.0  # part du swap, déjà incluse dans costs
 
 
 @dataclass
@@ -68,6 +73,23 @@ class _Position:
     entry_time: pd.Timestamp
     stop_raw: float
     tp_raw: Optional[float]
+
+
+_ROLLOVER_MULT = {0: 1, 1: 1, 2: 3, 3: 1, 4: 1}  # lun..ven, mercredi = triple
+
+
+def rollover_units(entry: pd.Timestamp, exit_: pd.Timestamp) -> int:
+    """Nuits payées entre entrée et sortie (mercredi = 3, week-end = 0).
+
+    Approximation : le changement de nuit est placé à minuit.
+    """
+    units = 0
+    day = entry.normalize()
+    end_day = exit_.normalize()
+    while day < end_day:
+        units += _ROLLOVER_MULT.get(day.weekday(), 0)
+        day += pd.Timedelta(days=1)
+    return units
 
 
 def max_drawdown(equity: pd.Series) -> Tuple[float, float]:
@@ -125,6 +147,10 @@ class BacktestResult:
         return sum(t.costs for t in self.trades)
 
     @property
+    def total_swap(self) -> float:
+        return sum(t.swap for t in self.trades)
+
+    @property
     def avg_duration_hours(self) -> float:
         if not self.trades:
             return 0.0
@@ -137,7 +163,7 @@ class BacktestResult:
 
     @property
     def gross_profit(self) -> float:
-        """Profit avant tous les coûts (spread, slippage, commission)."""
+        """Profit avant tous les coûts (spread, slippage, commission, swap)."""
         return sum(t.gross_pnl for t in self.trades)
 
     @property
@@ -163,6 +189,7 @@ class BacktestResult:
             f"Profit net        : ${self.net_profit:,.2f} ({self.net_profit / cap * 100:.1f} %)",
             f"Profit avant coûts: ${self.gross_profit:,.2f}",
             f"Coûts payés       : ${self.total_costs:,.2f}",
+            f"  dont swap       : ${self.total_swap:,.2f}",
             f"Trades            : {self.n_trades} (ignorés faute de taille : {self.skipped_trades})",
             f"Win rate          : {self.win_rate:.1f} %",
             f"Profit factor     : {self.profit_factor:.2f}",
@@ -196,6 +223,12 @@ def run_backtest(df: pd.DataFrame, cfg: Optional[BacktestConfig] = None) -> Back
     slip = cfg.slippage
     friction_per_lot = (cfg.spread + 2.0 * slip) * cs + cfg.commission_per_lot
 
+    swap_rate = {1: cfg.swap_long_per_oz, -1: cfg.swap_short_per_oz}
+
+    def swap_cost(p: "_Position", when: pd.Timestamp) -> float:
+        """Swap cumulé (en $) d'une position tenue de son entrée à 'when'."""
+        return rollover_units(p.entry_time, when) * swap_rate[p.side] * p.lots * cs
+
     n = len(df)
     index = df.index
     open_ = df["open"].to_numpy(dtype=float)
@@ -221,7 +254,8 @@ def run_backtest(df: pd.DataFrame, cfg: Optional[BacktestConfig] = None) -> Back
         assert p is not None
         exec_exit = raw_exit - p.side * (half + slip)
         gross = (raw_exit - p.raw_entry) * p.side * p.lots * cs
-        costs = friction_per_lot * p.lots
+        swap = swap_cost(p, when)
+        costs = friction_per_lot * p.lots + swap
         net = gross - costs
         equity += net
         trades.append(
@@ -236,6 +270,7 @@ def run_backtest(df: pd.DataFrame, cfg: Optional[BacktestConfig] = None) -> Back
                 gross_pnl=gross,
                 costs=costs,
                 net_pnl=net,
+                swap=swap,
             )
         )
         pos = None
@@ -298,7 +333,11 @@ def run_backtest(df: pd.DataFrame, cfg: Optional[BacktestConfig] = None) -> Back
 
         # 4) Capital de la bougie (position ouverte valorisée comme si fermée à la clôture)
         if pos is not None:
-            unreal = (close[i] - pos.raw_entry) * pos.side * pos.lots * cs - friction_per_lot * pos.lots
+            unreal = (
+                (close[i] - pos.raw_entry) * pos.side * pos.lots * cs
+                - friction_per_lot * pos.lots
+                - swap_cost(pos, index[i])
+            )
             curve[i] = equity + unreal
         else:
             curve[i] = equity

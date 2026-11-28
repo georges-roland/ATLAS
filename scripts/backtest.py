@@ -1,7 +1,7 @@
 """Lance un backtest sur un CSV de chandeliers (export MT5 ou CSV simple).
 
 Exemple :
-    py scripts/backtest.py data/raw/XAUUSD_H1.csv --short --spread 0.3 --commission 7
+    py scripts/backtest.py data/raw/XAUUSD_H4_clean.csv --tf 240 --ema 200 --swap-long 0.126
 
 Les données sont d'abord VALIDEES (atlas.data.validate_candles). Si elles
 contiennent des erreurs, le backtest ne tourne pas.
@@ -21,7 +21,12 @@ from atlas.backtest import BacktestConfig, DataValidationError, backtest_from_cs
 def main() -> int:
     p = argparse.ArgumentParser(description="Backtest ATLAS v2 (prix / EMA, stop ATR)")
     p.add_argument("csv", type=Path)
-    p.add_argument("--tf", type=int, default=60, help="timeframe en minutes (défaut 60)")
+    p.add_argument(
+        "--tf",
+        type=int,
+        default=60,
+        help="timeframe du FICHIER en minutes (sert à la validation, ne rééchantillonne pas)",
+    )
     p.add_argument("--capital", type=float, default=10_000.0)
     p.add_argument("--risk", type=float, default=1.0, help="risque par trade en %% du capital")
     p.add_argument("--ema", type=int, default=20)
@@ -32,6 +37,8 @@ def main() -> int:
     p.add_argument("--spread", type=float, default=0.30, help="USD par once")
     p.add_argument("--slippage", type=float, default=0.05, help="USD par once, par exécution")
     p.add_argument("--commission", type=float, default=7.0, help="USD par lot, aller-retour")
+    p.add_argument("--swap-long", type=float, default=0.0, help="USD par once et par nuit (coût)")
+    p.add_argument("--swap-short", type=float, default=0.0, help="USD par once et par nuit (coût)")
     p.add_argument(
         "--start",
         default=None,
@@ -52,6 +59,8 @@ def main() -> int:
         spread=a.spread,
         slippage=a.slippage,
         commission_per_lot=a.commission,
+        swap_long_per_oz=a.swap_long,
+        swap_short_per_oz=a.swap_short,
     )
     try:
         res = backtest_from_csv(
