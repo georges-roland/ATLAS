@@ -32,6 +32,12 @@ def main() -> int:
     p.add_argument("--spread", type=float, default=0.30, help="USD par once")
     p.add_argument("--slippage", type=float, default=0.05, help="USD par once, par exécution")
     p.add_argument("--commission", type=float, default=7.0, help="USD par lot, aller-retour")
+    p.add_argument(
+        "--start",
+        default=None,
+        help="début de la période, AAAA-MM-JJ (les indicateurs repartent de zéro à cette date)",
+    )
+    p.add_argument("--end", default=None, help="fin de la période, AAAA-MM-JJ (incluse)")
     p.add_argument("--trades-csv", type=Path, default=None, help="exporte les trades")
     a = p.parse_args()
 
@@ -48,12 +54,18 @@ def main() -> int:
         commission_per_lot=a.commission,
     )
     try:
-        res = backtest_from_csv(a.csv, cfg, timeframe_minutes=a.tf)
+        res = backtest_from_csv(
+            a.csv, cfg, timeframe_minutes=a.tf, start=a.start, end=a.end
+        )
+    except ValueError as e:  # période vide, colonnes manquantes...
+        print(f"Erreur : {e}")
+        return 1
     except DataValidationError as e:
         print(e)
         print("\nBacktest annulé : corrige d'abord les données (py scripts/check_data.py ...).")
         return 1
 
+    print(f"Période testée : {res.equity_curve.index[0]} -> {res.equity_curve.index[-1]}")
     print(res.summary())
     if a.trades_csv:
         pd.DataFrame([t.__dict__ for t in res.trades]).to_csv(a.trades_csv, index=False)

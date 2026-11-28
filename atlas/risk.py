@@ -48,14 +48,3 @@ def lots_for_risk(
     if lots < spec.min_lot:
         return 0.0
     return lots
-
-# Convenience wrapper used by the back‑test script.
-# Mirrors the original expected name ``lot_size_for_trade``.
-# Uses the XAUUSD spec by default.
-from atlas.config import XAUUSD
-
-def lot_size_for_trade(equity: float, risk_pct: float, entry: float, stop: float, spec: XAUUSD = XAUUSD) -> float:
-    """Calculate position size (lots) given equity, risk %, entry price and stop price.
-    Thin wrapper around :func:`lots_for_risk` to preserve the historical API.
-    """
-    return lots_for_risk(equity, risk_pct, entry, stop, spec)

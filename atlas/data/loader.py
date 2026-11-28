@@ -12,6 +12,17 @@ import pandas as pd
 OHLC = ["open", "high", "low", "close"]
 
 
+def _detect_encoding(path: Path) -> str:
+    """Devine l'encodage du fichier (les exports MT5 sont parfois en UTF-16)."""
+    with open(path, "rb") as f:
+        head = f.read(4)
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"  # avec BOM : Python choisit little/big endian tout seul
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    return "utf-8"
+
+
 def _find_column(df: pd.DataFrame, names: list[str]):
     for name in names:
         if name in df.columns:
@@ -33,14 +44,7 @@ def load_candles(path: Union[str, Path]) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Fichier introuvable : {path}")
 
-    # Detect encoding (handle UTF‑16 with BOM or UTF‑8 with BOM)
-    with open(path, "rb") as f:
-        raw_start = f.read(4)
-    if raw_start.startswith(b"\xff\xfe") or raw_start.startswith(b"\xfe\xff"):
-        enc = "utf-16"
-    else:
-        enc = "utf-8-sig"
-    df = pd.read_csv(path, sep=None, engine="python", encoding=enc)
+    df = pd.read_csv(path, sep=None, engine="python", encoding=_detect_encoding(path))
     df.columns = [str(c).strip().strip("<>").lower() for c in df.columns]
 
     missing = [c for c in OHLC if c not in df.columns]

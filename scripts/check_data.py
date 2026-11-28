@@ -23,8 +23,6 @@ def main() -> int:
     report = validate_candles(df, timeframe_minutes=args.tf)
     print(f"Période : {df.index.min()} -> {df.index.max()}")
     print(report.summary())
-    if not report.ok:
-        print("\n[WARNING] Validation failed: data contains blocking issues (errors, weekend candles, or excessive flat/repeated candles).")
     for start, end, weekend in report.unexpected_gaps[:10]:
         print(f"  trou : {start} -> {end}")
     return 0 if report.ok else 1

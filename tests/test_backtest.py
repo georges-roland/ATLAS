@@ -250,3 +250,121 @@ def test_backtest_from_csv_runs_on_valid_data(tmp_path):
     df.reset_index().rename(columns={"timestamp": "time"}).to_csv(f, index=False)
     res = backtest_from_csv(f, cfg(), timeframe_minutes=60)
     assert res.n_trades == 1
+
+
+# --- Robustesse : profit avant coûts, résultats par année, périodes -------
+
+from atlas.backtest import BacktestResult  # noqa: E402,F401
+
+COSTS = dict(spread=0.3, slippage=0.05, commission_per_lot=7.0)
+
+
+def test_gross_profit_minus_costs_equals_net_profit():
+    res = run_backtest(long_scenario(SL_BY_LOW), cfg(**COSTS))
+    assert res.total_costs > 0
+    assert res.gross_profit - res.total_costs == pytest.approx(res.net_profit)
+
+
+def test_yearly_profits_sum_to_net_profit():
+    res = run_backtest(long_scenario(SL_BY_LOW), cfg(**COSTS))
+    assert sum(res.yearly_net_profit().values()) == pytest.approx(res.net_profit)
+
+
+def test_yearly_profit_uses_exit_year_not_entry_year():
+    # Entrée le 31/12/2024 à 23:00 (bougie 5), sortie le 01/01/2025 à 00:00 (bougie 6)
+    df = make_df(
+        [FLAT] * 4 + [BREAKOUT, (111, 112, 110.5, 111.5), SL_BY_LOW, (111, 111.5, 110.5, 111)],
+        start="2024-12-31 18:00",
+    )
+    res = run_backtest(df, cfg())
+    t = res.trades[0]
+    assert t.entry_time.year == 2024
+    assert t.exit_time.year == 2025
+    assert list(res.yearly_net_profit().keys()) == [2025]
+
+
+def test_low_sample_warning_and_message():
+    res = run_backtest(long_scenario(SL_BY_LOW), cfg())
+    assert res.n_trades == 1
+    assert res.low_sample_warning is True
+    assert "ATTENTION : moins de 30 trades, résultat non significatif" in res.summary()
+    assert "Profit avant coûts" in res.summary()
+
+
+def test_no_low_sample_warning_with_enough_trades():
+    res = run_backtest(long_scenario(SL_BY_LOW), cfg())
+    res.trades = res.trades * 30  # 30 trades au total
+    assert res.low_sample_warning is False
+    assert "ATTENTION" not in res.summary()
+
+
+def two_day_scenario():
+    """Un trade le mardi 02/01/2024, un autre le jeudi 04/01/2024 (pont plat entre les deux)."""
+    first = [FLAT] * 4 + [BREAKOUT, (111, 112, 110.5, 111.5), SL_BY_LOW, (111, 111.5, 110.5, 111)]
+    bridge = [FLAT] * 40
+    second = [FLAT] * 4 + [BREAKOUT, (111, 112, 110.5, 111.5), SL_BY_LOW, (111, 111.5, 110.5, 111)]
+    return make_df(first + bridge + second)  # démarre le mardi 02/01/2024 à 00:00
+
+
+def write_csv(df, path):
+    df.reset_index().rename(columns={"timestamp": "time"}).to_csv(path, index=False)
+
+
+def test_period_scenario_has_two_trades_on_two_days(tmp_path):
+    df = two_day_scenario()
+    res = run_backtest(df, cfg())
+    assert res.n_trades == 2
+    assert res.trades[0].entry_time.date().isoformat() == "2024-01-02"
+    assert res.trades[1].entry_time.date().isoformat() == "2024-01-04"
+
+
+def test_without_start_end_result_is_unchanged(tmp_path):
+    df = two_day_scenario()
+    f = tmp_path / "d.csv"
+    write_csv(df, f)
+    direct = run_backtest(df, cfg())
+    via_csv = backtest_from_csv(f, cfg(), timeframe_minutes=60)
+    assert [(t.entry_time, t.exit_time, t.net_pnl) for t in via_csv.trades] == [
+        (t.entry_time, t.exit_time, t.net_pnl) for t in direct.trades
+    ]
+
+
+def test_start_excludes_earlier_trades(tmp_path):
+    f = tmp_path / "d.csv"
+    write_csv(two_day_scenario(), f)
+    res = backtest_from_csv(f, cfg(), timeframe_minutes=60, start="2024-01-04")
+    assert res.n_trades == 1
+    assert all(t.entry_time >= pd.Timestamp("2024-01-04") for t in res.trades)
+
+
+def test_end_is_inclusive_for_the_whole_day(tmp_path):
+    f = tmp_path / "d.csv"
+    write_csv(two_day_scenario(), f)
+    res = backtest_from_csv(f, cfg(), timeframe_minutes=60, end="2024-01-02")
+    assert res.n_trades == 1  # le trade du 02/01 (05:00) est inclus, celui du 04/01 non
+    assert res.trades[0].entry_time.date().isoformat() == "2024-01-02"
+
+
+def test_empty_period_raises_clear_error(tmp_path):
+    f = tmp_path / "d.csv"
+    write_csv(two_day_scenario(), f)
+    with pytest.raises(ValueError, match="Aucune donnée"):
+        backtest_from_csv(f, cfg(), timeframe_minutes=60, start="2030-01-01")
+
+
+def test_validation_covers_whole_file_even_outside_the_period(tmp_path):
+    df = two_day_scenario()
+    saturday = make_df([FLAT], start="2024-01-06 10:00")  # bougie de samedi, hors période
+    f = tmp_path / "d.csv"
+    write_csv(pd.concat([df, saturday]), f)
+    with pytest.raises(DataValidationError):
+        backtest_from_csv(f, cfg(), timeframe_minutes=60, end="2024-01-04")
+
+
+def test_low_sample_threshold_is_exactly_30_trades():
+    res = run_backtest(long_scenario(SL_BY_LOW), cfg())
+    res.trades = res.trades * 29
+    assert res.low_sample_warning is True  # 29 trades : encore trop peu
+    res.trades = res.trades + res.trades[:1]
+    assert res.n_trades == 30
+    assert res.low_sample_warning is False  # 30 trades : plus d'alerte

@@ -15,7 +15,7 @@ Règles (toutes testées dans tests/test_backtest.py) :
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -135,6 +135,23 @@ class BacktestResult:
     def drawdown(self) -> Tuple[float, float]:
         return max_drawdown(self.equity_curve)
 
+    @property
+    def gross_profit(self) -> float:
+        """Profit avant tous les coûts (spread, slippage, commission)."""
+        return sum(t.gross_pnl for t in self.trades)
+
+    @property
+    def low_sample_warning(self) -> bool:
+        """True si trop peu de trades pour conclure quoi que ce soit."""
+        return self.n_trades < 30
+
+    def yearly_net_profit(self) -> Dict[int, float]:
+        """Profit net par année, selon l'année de SORTIE du trade."""
+        out: Dict[int, float] = {}
+        for t in self.trades:
+            out[t.exit_time.year] = out.get(t.exit_time.year, 0.0) + t.net_pnl
+        return dict(sorted(out.items()))
+
     def summary(self) -> str:
         dd_usd, dd_pct = self.drawdown
         cap = self.config.initial_capital
@@ -144,13 +161,22 @@ class BacktestResult:
             f"Capital initial   : ${cap:,.2f}",
             f"Capital final     : ${self.final_equity:,.2f}",
             f"Profit net        : ${self.net_profit:,.2f} ({self.net_profit / cap * 100:.1f} %)",
+            f"Profit avant coûts: ${self.gross_profit:,.2f}",
+            f"Coûts payés       : ${self.total_costs:,.2f}",
             f"Trades            : {self.n_trades} (ignorés faute de taille : {self.skipped_trades})",
             f"Win rate          : {self.win_rate:.1f} %",
             f"Profit factor     : {self.profit_factor:.2f}",
             f"Espérance / trade : ${self.expectancy:,.2f}",
             f"Drawdown max      : ${dd_usd:,.2f} ({dd_pct:.1f} %)",
             f"Durée moyenne     : {self.avg_duration_hours:.1f} h",
-            f"Coûts payés       : ${self.total_costs:,.2f}",
+        ]
+        yearly = self.yearly_net_profit()
+        if yearly:
+            lines.append("--- Profit net par année (année de sortie) ---")
+            lines.extend(f"{year}              : ${value:,.2f}" for year, value in yearly.items())
+        if self.low_sample_warning:
+            lines.append("ATTENTION : moins de 30 trades, résultat non significatif")
+        lines += [
             "--- Comparaison : achat-conservation (sans levier) ---",
             f"Capital final     : ${self.buy_hold_final_equity:,.2f}",
             f"Profit net        : ${bh_profit:,.2f} ({bh_profit / cap * 100:.1f} %)",
@@ -311,10 +337,26 @@ def backtest_from_csv(
     path: Union[str, Path],
     cfg: Optional[BacktestConfig] = None,
     timeframe_minutes: int = 60,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ) -> BacktestResult:
-    """Charge, VALIDE puis backtest. Refuse de tourner si les données sont invalides."""
+    """Charge, VALIDE puis backtest. Refuse de tourner si les données sont invalides.
+
+    start / end (AAAA-MM-JJ, inclusifs) limitent la période testée. La validation
+    porte toujours sur TOUTES les données ; le filtrage vient après. Les
+    indicateurs repartent de zéro au début de la période (chauffe de
+    max(ema, atr) bougies sans trade).
+    """
     df = load_candles(path)
     report = validate_candles(df, timeframe_minutes=timeframe_minutes)
     if not report.ok:
         raise DataValidationError("Données invalides :\n" + report.summary())
+    if start is not None:
+        df = df[df.index >= pd.Timestamp(start).normalize()]
+    if end is not None:
+        df = df[df.index < pd.Timestamp(end).normalize() + pd.Timedelta(days=1)]
+    if df.empty:
+        raise ValueError(
+            f"Aucune donnée dans la période demandée (start={start}, end={end})."
+        )
     return run_backtest(df, cfg)
